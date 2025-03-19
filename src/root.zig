@@ -1,5 +1,3 @@
-// Note to self: never use usize here.
-
 const std = @import("std");
 const mem = std.mem;
 const assert = std.debug.assert;
@@ -210,6 +208,10 @@ pub const Strig = packed union {
         }
     }
 
+    // <at> is the index into the string's raw data, not a character index.
+    // Doesn't check that the string is uncorrupt, that bytes is valid UTF-8,
+    // that inserting wouldn't split codepoints, etc.
+    //
     fn insertBytesUnchecked(self: *Self, bytes_: []const u8, at: usize, alloc: mem.Allocator) !void {
         assert(at <= self.len());
 
@@ -221,7 +223,7 @@ pub const Strig = packed union {
         };
 
         // Shift old data over
-        for (at..old_len) |i| buffer[i + bytes_.len] = buffer[i];
+        mem.copyBackwards(u8, buffer[at + bytes_.len .. old_len + bytes_.len], buffer[at..old_len]);
 
         // Insert new buffer
         @memcpy(buffer[at .. at + bytes_.len], bytes_);
@@ -259,6 +261,27 @@ pub const Strig = packed union {
         try self.insertBytesUnchecked(slice, self.len(), alloc);
     }
 
+    pub fn insertBytes(self: *Self, bytes_: []const u8, char_ind: usize, alloc: mem.Allocator) !void {
+        if (!unicode.utf8ValidateSlice(bytes_))
+            return error.InvalidUtf8;
+        try self.insertBytesUnchecked(bytes_, try self.findCharInd(char_ind), alloc);
+    }
+
+    pub fn insertStrig(self: *Self, strig: *const Self, char_ind: usize, alloc: mem.Allocator) !void {
+        try self.insertBytesUnchecked(strig.bytes(), try self.findCharInd(char_ind), alloc);
+    }
+
+    pub fn insert(self: *Self, codepoint: u21, char_ind: usize, alloc: mem.Allocator) !void {
+        if (!unicode.utf8ValidCodepoint(codepoint))
+            return error.InvalidUtf8;
+
+        var buf: [4]u8 = undefined;
+        const encoded_len = try std.unicode.utf8Encode(codepoint, buf[0..]);
+        const slice = buf[0..encoded_len];
+
+        try self.insertBytesUnchecked(slice, try self.findCharInd(char_ind), alloc);
+    }
+
     pub fn popChar(self: *Self) ?u21 {
         if (self.len() == 0)
             return null;
@@ -281,7 +304,7 @@ pub const Strig = packed union {
     }
 
     // Gets the index of the nth codepoint.
-    pub fn findCharInd(self: *const Self, nth: u56) !u56 {
+    pub fn findCharInd(self: *const Self, nth: usize) !u56 {
         const l = self.len();
         const data = self.bytes();
 
@@ -326,6 +349,16 @@ const CORPUS: []const []const u8 = &.{
     @embedFile("fuzz/urandom-sSmU5"),
     @embedFile("fuzz/urandom-uSE1e"),
 };
+
+test "insertBytes" {
+    var str = try Strig.from("First name: <>; Last name: <>", testing.allocator);
+    defer str.deinit(testing.allocator);
+
+    try str.insertBytes("Fëanor", 13, testing.allocator);
+    try str.insertBytes("Curufinwë", 34, testing.allocator);
+
+    std.log.warn("{}", .{str});
+}
 
 test "appendBytes" {
     var str = try Strig.from("Why, ", testing.allocator);
