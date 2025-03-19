@@ -140,6 +140,7 @@ pub const Strig = packed union {
     // Sets the length to a smaller amount. Does not free capacity.
     pub fn shrinkTo(self: *Self, to: usize) void {
         assert(self.len() >= to);
+        defer assert(self.len() == to);
         return switch (self.kind()) {
             .stack => |_| self.magicPtr().* = Magic.INLINE_SMALL + @as(u8, @intCast(to)),
             .heap => self.heap.data.len = to,
@@ -261,46 +262,78 @@ pub const Strig = packed union {
         try self.insertBytesUnchecked(slice, self.len(), alloc);
     }
 
-    pub fn insertBytes(self: *Self, bytes_: []const u8, char_ind: usize, alloc: mem.Allocator) !void {
+    pub fn insertBytes(self: *Self, bytes_: []const u8, at: usize, alloc: mem.Allocator) !void {
         if (!unicode.utf8ValidateSlice(bytes_))
             return error.InvalidUtf8;
-        try self.insertBytesUnchecked(bytes_, try self.findCharInd(char_ind), alloc);
+        if (!self.isCharStart(at))
+            return error.WouldRuinString;
+        try self.insertBytesUnchecked(bytes_, at, alloc);
     }
 
-    pub fn insertStrig(self: *Self, strig: *const Self, char_ind: usize, alloc: mem.Allocator) !void {
-        try self.insertBytesUnchecked(strig.bytes(), try self.findCharInd(char_ind), alloc);
+    pub fn insertStrig(self: *Self, strig: *const Self, at: usize, alloc: mem.Allocator) !void {
+        if (!self.isCharStart(at))
+            return error.WouldRuinString;
+        try self.insertBytesUnchecked(strig.bytes(), at, alloc);
     }
 
-    pub fn insert(self: *Self, codepoint: u21, char_ind: usize, alloc: mem.Allocator) !void {
+    pub fn insert(self: *Self, codepoint: u21, at: usize, alloc: mem.Allocator) !void {
         if (!unicode.utf8ValidCodepoint(codepoint))
             return error.InvalidUtf8;
+        if (!self.isCharStart(at))
+            return error.WouldRuinString;
 
         var buf: [4]u8 = undefined;
         const encoded_len = try std.unicode.utf8Encode(codepoint, buf[0..]);
         const slice = buf[0..encoded_len];
 
-        try self.insertBytesUnchecked(slice, try self.findCharInd(char_ind), alloc);
+        try self.insertBytesUnchecked(slice, at, alloc);
+    }
+
+    fn removeRangeUnchecked(self: *Self, at: usize, n: usize) void {
+        const data = self.bytesMut();
+        if (at != data.len - 1)
+            mem.copyForwards(u8, data[at .. data.len - n], data[at + n ..]);
+        self.shrinkTo(data.len - n);
+    }
+
+    pub fn removeChar(self: *Self, at: usize) ?u21 {
+        if (self.len() == 0)
+            return null;
+        if (!self.isCharStart(at))
+            @panic("Removal would split UTF-8 sequence.");
+
+        const data = self.bytesMut();
+        const seqlen = unicode.utf8ByteSequenceLength(data[at]) catch unreachable;
+        const codepoint = unicode.utf8Decode(data[at .. at + seqlen]) catch unreachable;
+        self.removeRangeUnchecked(at, seqlen);
+        return codepoint;
     }
 
     pub fn popChar(self: *Self) ?u21 {
-        if (self.len() == 0)
+        const data = self.bytes();
+        if (data.len == 0)
             return null;
 
-        const data = self.bytes();
-
-        // Find the start of the UTF-8 sequence, by moving backwards until we
+        // Find the end of the UTF-8 sequence, by moving backwards until we
         // find the first non-continuation byte.
         var start = data.len - 1;
         var seqlen: usize = 1;
         while (data[start] & 0b11000000 == 0b10000000) : (seqlen += 1) {
             if (start == 0)
-                @panic("String contains corrupted data."); // Invalid UTF8
+                // Broken sequence at beginning of string.
+                @panic("String contains corrupted data.");
             start -= 1;
         }
 
-        const codepoint = unicode.utf8Decode(data[start..]) catch unreachable;
-        self.shrinkTo(data.len - seqlen);
+        const codepoint = unicode.utf8Decode(data[start .. start + seqlen]) catch unreachable;
+        self.removeRangeUnchecked(start, seqlen);
         return codepoint;
+    }
+
+    // Checks if a given index is at a the BEGINNING of a UTF-8 character
+    // sequence.
+    pub fn isCharStart(self: *const Self, at: usize) bool {
+        return self.bytes()[at] & 0b11000000 != 0b10000000;
     }
 
     // Gets the index of the nth codepoint.
@@ -355,9 +388,9 @@ test "insertBytes" {
     defer str.deinit(testing.allocator);
 
     try str.insertBytes("Fëanor", 13, testing.allocator);
-    try str.insertBytes("Curufinwë", 34, testing.allocator);
+    try str.insertBytes("Curufinwë", 35, testing.allocator);
 
-    std.log.warn("{}", .{str});
+    try testing.expect(mem.eql(u8, str.bytes(), "First name: <Fëanor>; Last name: <Curufinwë>"));
 }
 
 test "appendBytes" {
@@ -433,6 +466,18 @@ test "makeLowercaseASCII, makeUppercaseASCII" {
 
     try str.makeUppercaseASCII();
     try testing.expect(mem.eql(u8, str.bytes(), "!@#ÂHELLO, THIS IS A TEST. I SAID HELLO"));
+}
+
+test "removeChar" {
+    var str = Strig.from("Thïs is â teßt", testing.allocator) catch unreachable;
+    defer str.deinit(testing.allocator);
+
+    try testing.expectEqual('T', str.removeChar(0));
+    try testing.expectEqual('ï', str.removeChar(1));
+    try testing.expect(mem.eql(u8, str.bytes(), "hs is â teßt"));
+
+    try testing.expectEqual('ß', str.removeChar(12));
+    try testing.expect(mem.eql(u8, str.bytes(), "hs is â tet"));
 }
 
 test "popChar" {
