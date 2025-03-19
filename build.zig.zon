@@ -1,7 +1,7 @@
 .{
     .name = .strig,
     .version = "0.0.0",
-    .fingerprint = 0x955a1bc317edaab2, // Changing this has security and trust implications.
+    .fingerprint = 0xac91c2e2041832b5, // Changing this has security and trust implications.
 
     .minimum_zig_version = "0.14.0-dev.3452+0367d684f",
 
