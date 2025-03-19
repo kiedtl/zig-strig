@@ -12,6 +12,11 @@ comptime {
 
 pub const Magic = struct {
     pub const INLINE_SMALL = 192; // For inline strings 23 len or less
+
+    // CompactString crate uses values immediately after inline range to denote
+    // heap-allocated strings, but by using values over here, we can better
+    // detect some invalid states in fuzzing (since there are unused values "in
+    // between").
     pub const HEAP = 254;
     pub const IMMUT = 255;
 };
@@ -31,6 +36,10 @@ pub const PackedSlice = packed struct {
     pub fn into(self: PackedSlice) []const u8 {
         return self.ptr.immut[0..self.len];
     }
+
+    pub fn intoMut(self: PackedSlice) []u8 {
+        return self.ptr.mut[0..self.len];
+    }
 };
 
 pub const Strig = packed union {
@@ -46,7 +55,31 @@ pub const Strig = packed union {
         data: PackedSlice,
         capacity: u56,
         end: u8 = undefined,
+
+        pub fn entireThing(self: *Heap) []u8 {
+            return self.data.ptr.mut[0..self.capacity];
+        }
+
+        pub fn entireThingConst(self: *const Heap) []const u8 {
+            return self.data.ptr.mut[0..self.capacity];
+        }
     };
+
+    // NOTE: this function should copy the buffer before setting self, in case
+    // bytes_ points to self's stack portion or similar.
+    //
+    // NOTE: length should be exactly bytes_.length
+    //
+    fn setHeap(self: *Self, bytes_: []const u8, p_capacity: ?usize, alloc: mem.Allocator) !void {
+        const capacity = p_capacity orelse bytes_.len;
+        assert(capacity >= bytes_.len);
+        const buf = try alloc.alloc(u8, capacity);
+        @memcpy(buf[0..bytes_.len], bytes_);
+        self.heap = .{ .capacity = @intCast(capacity), .data = PackedSlice.from(buf) };
+        self.heap.data.len = bytes_.len;
+        self.magicPtr().* = Magic.HEAP;
+        assert(self.len() == bytes_.len);
+    }
 
     // Create from a non-owned string. Buffer is not reused.
     //
@@ -56,16 +89,11 @@ pub const Strig = packed union {
         var b: Self = undefined;
         switch (bytes_.len) {
             0...23 => {
-                mem.copyForwards(u8, b.getInlineData(), bytes_);
+                @memcpy(b.getInlineData()[0..bytes_.len], bytes_);
                 b.magicPtr().* = @as(u8, @intCast(bytes_.len)) + Magic.INLINE_SMALL;
             },
-            24 => mem.copyForwards(u8, b.getInlineData(), bytes_),
-            else => {
-                const buf = try alloc.alloc(u8, bytes_.len);
-                mem.copyForwards(u8, buf, bytes_);
-                b.heap = .{ .capacity = @intCast(bytes_.len), .data = PackedSlice.from(buf) };
-                b.magicPtr().* = Magic.HEAP;
-            },
+            24 => @memcpy(b.getInlineData()[0..bytes_.len], bytes_),
+            else => try b.setHeap(bytes_, null, alloc),
         }
         return b;
     }
@@ -96,7 +124,7 @@ pub const Strig = packed union {
 
     pub fn deinit(self: *const Self, alloc: mem.Allocator) void {
         switch (self.magic()) {
-            Magic.HEAP => alloc.free(self.heap.data.into()),
+            Magic.HEAP => alloc.free(self.heap.entireThingConst()),
             else => {},
         }
     }
@@ -106,9 +134,9 @@ pub const Strig = packed union {
         return switch (self.magic()) {
             0...I - 1 => .{ .stack = 24 },
             I...I + 23 => |v| .{ .stack = @intCast(v - I) },
-            Magic.IMMUT => .immut,
+            I + 24...Magic.HEAP - 1 => unreachable,
             Magic.HEAP => .heap,
-            else => unreachable,
+            Magic.IMMUT => .immut,
         };
     }
 
@@ -137,6 +165,78 @@ pub const Strig = packed union {
 
         try writer.writeAll(self.bytes());
     }
+
+    // Ensure required MUTABLE capacity. In other words, constant strings will
+    // be converted to inlined or heap strings.
+    //
+    pub fn ensureCapacity(self: *Self, needed_cap: u64, alloc: mem.Allocator) !void {
+        switch (self.kind()) {
+            .immut => {
+                if (@max(needed_cap, self.len()) > 24)
+                    try self.setHeap(self.immut.into(), @max(needed_cap, self.len()), alloc)
+                else
+                    self.* = try Self.from(self.bytes(), alloc);
+            },
+            .stack => |_| {
+                if (needed_cap > 24)
+                    try self.setHeap(self.bytes(), needed_cap, alloc);
+            },
+            .heap => {
+                const allocated_buffer = self.heap.entireThing();
+                const data = self.heap.data.intoMut();
+
+                if (self.heap.capacity < needed_cap) {
+                    var new_capac = data.len;
+                    while (new_capac < needed_cap)
+                        new_capac = new_capac * 150 / 100;
+
+                    if (alloc.remap(allocated_buffer, new_capac)) |newbuf| {
+                        assert(newbuf.ptr == data.ptr);
+                        self.heap.capacity = @intCast(newbuf.len);
+                        self.heap.data.ptr = .{ .mut = newbuf.ptr };
+                    } else {
+                        const newbuf = try alloc.alloc(u8, new_capac);
+                        defer alloc.free(allocated_buffer);
+                        @memcpy(newbuf[0..data.len], data);
+                        self.heap.data.ptr = .{ .mut = newbuf.ptr };
+                        self.heap.capacity = @intCast(new_capac);
+                    }
+                }
+            },
+        }
+    }
+
+    pub fn append(self: *Self, codepoint: u21, alloc: mem.Allocator) !void {
+        if (!unicode.utf8ValidCodepoint(codepoint))
+            return error.InvalidUtf8;
+
+        var buf: [4]u8 = undefined;
+        const encoded_len = try std.unicode.utf8Encode(codepoint, buf[0..]);
+        const slice = buf[0..encoded_len];
+
+        const old_len = self.len();
+        try self.ensureCapacity(old_len + encoded_len, alloc);
+
+        // Change length
+        switch (self.kind()) {
+            .immut => unreachable,
+            .stack => |l| {
+                const new_l = @as(u8, l) + encoded_len;
+                assert(new_l <= 24);
+                if (new_l != 24)
+                    self.magicPtr().* = Magic.INLINE_SMALL + new_l;
+            },
+            .heap => self.heap.data.len += encoded_len,
+        }
+
+        // Append
+        const dest = switch (self.kind()) {
+            .immut => unreachable,
+            .stack => |_| self.getInlineData()[old_len .. old_len + encoded_len],
+            .heap => self.heap.data.ptr.mut[old_len .. old_len + encoded_len],
+        };
+        @memcpy(dest, slice);
+    }
 };
 
 const CORPUS: []const []const u8 = &.{
@@ -157,13 +257,85 @@ test "Created from a immutable string" {
     try testing.expect(mem.eql(u8, mystring.bytes(), "Hello, world!"));
 }
 
-test "Basic roundtrip testing" {
+test "Basic append testing" {
+    var str = Strig.fromConst("") catch return;
+    defer str.deinit(testing.allocator);
+
+    try testing.expectEqual(Strig.Kind.immut, str.kind());
+    try testing.expectEqual(0, str.len());
+
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('â', testing.allocator);
+
+    try testing.expectEqual(Strig.Kind{ .stack = 4 }, str.kind());
+    try testing.expect(mem.eql(u8, str.bytes(), "aaâ"));
+
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+
+    try testing.expectEqual(Strig.Kind{ .stack = 8 }, str.kind());
+    try testing.expect(mem.eql(u8, str.bytes(), "aaâaaaa"));
+
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+
+    try testing.expectEqual(Strig.Kind{ .stack = 24 }, str.kind());
+
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+    try str.append('a', testing.allocator);
+
+    try testing.expectEqual(Strig.Kind.heap, str.kind());
+    try testing.expectEqual(28, str.len());
+    try testing.expect(mem.eql(u8, str.bytes(), "aaâaaaaaaaaaaaaaaaaaaaaaaaa"));
+}
+
+test "Basic roundtrip fuzz testing" {
     try testing.fuzz({}, struct {
         pub fn f(_: void, input: []const u8) anyerror!void {
             const str = Strig.from(input, testing.allocator) catch return;
             defer str.deinit(testing.allocator);
             try testing.expectEqual(str.len(), input.len);
             try testing.expect(mem.eql(u8, str.bytes(), input));
+        }
+    }.f, .{ .corpus = CORPUS });
+}
+
+test "Mutating via append()" {
+    try testing.fuzz({}, struct {
+        pub fn f(_: void, input: []const u8) anyerror!void {
+            var str = Strig.fromConst("") catch return;
+            defer str.deinit(testing.allocator);
+
+            var buf = std.ArrayList(u8).init(testing.allocator);
+            defer buf.deinit();
+
+            var unicode_buf: [4]u8 = undefined;
+            for (input) |codepoint| {
+                const encoded_len = try std.unicode.utf8Encode(codepoint, unicode_buf[0..]);
+                try buf.appendSlice(unicode_buf[0..encoded_len]);
+                try str.append(codepoint, testing.allocator);
+            }
+            try testing.expectEqual(buf.items.len, str.len());
+            try testing.expect(mem.eql(u8, str.bytes(), buf.items));
         }
     }.f, .{ .corpus = CORPUS });
 }
