@@ -39,6 +39,17 @@ pub const Strig = packed union {
 
     pub const Kind = union(enum) { stack: u5, heap };
 
+    pub const Error = error{
+        InvalidUtf8,
+    } || mem.Allocator.Error || error{
+        // Why isn't unicode.Utf8DecodeError public?
+        Utf8ExpectedContinuation,
+        Utf8OverlongEncoding,
+        Utf8EncodesSurrogateHalf,
+        Utf8CannotEncodeSurrogateHalf,
+        CodepointTooLarge,
+    };
+
     pub const Heap = packed struct(u192) {
         data: PackedSlice,
         capacity: u56,
@@ -169,14 +180,14 @@ pub const Strig = packed union {
         };
     }
 
-    pub fn format(self: *const Self, comptime f: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: *const Self, comptime f: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
         if (comptime mem.eql(u8, f, "s")) {
             @compileError("How about no");
         } else if (comptime !mem.eql(u8, f, "")) {
             @compileError("Unknown format string: '" ++ f ++ "'");
         }
 
-        try writer.writeAll(self.bytes());
+        try w.writeAll(self.bytes());
     }
 
     // Ensure required MUTABLE capacity. In other words, constant strings will
@@ -213,7 +224,7 @@ pub const Strig = packed union {
     // Doesn't check that the string is uncorrupt, that bytes is valid UTF-8,
     // that inserting wouldn't split codepoints, etc.
     //
-    fn insertBytesUnchecked(self: *Self, bytes_: []const u8, at: usize, alloc: mem.Allocator) !void {
+    fn insertBytesUnchecked(self: *Self, bytes_: []const u8, at: usize, alloc: mem.Allocator) Error!void {
         assert(at <= self.len());
 
         const old_len = self.len();
@@ -241,17 +252,17 @@ pub const Strig = packed union {
         }
     }
 
-    pub fn appendBytes(self: *Self, bytes_: []const u8, alloc: mem.Allocator) !void {
+    pub fn appendBytes(self: *Self, bytes_: []const u8, alloc: mem.Allocator) Error!void {
         if (!unicode.utf8ValidateSlice(bytes_))
             return error.InvalidUtf8;
         try self.insertBytesUnchecked(bytes_, self.len(), alloc);
     }
 
-    pub fn appendStrig(self: *Self, strig: *const Self, alloc: mem.Allocator) !void {
+    pub fn appendStrig(self: *Self, strig: *const Self, alloc: mem.Allocator) Error!void {
         try self.insertBytesUnchecked(strig.bytes(), self.len(), alloc);
     }
 
-    pub fn append(self: *Self, codepoint: u21, alloc: mem.Allocator) !void {
+    pub fn append(self: *Self, codepoint: u21, alloc: mem.Allocator) Error!void {
         if (!unicode.utf8ValidCodepoint(codepoint))
             return error.InvalidUtf8;
 
@@ -262,16 +273,31 @@ pub const Strig = packed union {
         try self.insertBytesUnchecked(slice, self.len(), alloc);
     }
 
+    pub const WriterCtx = struct {
+        str: *Self,
+        alloc: mem.Allocator,
+
+        pub fn appendWrite(self: WriterCtx, m: []const u8) Error!usize {
+            try self.str.appendBytes(m, self.alloc);
+            return m.len;
+        }
+    };
+    pub const Writer = std.io.Writer(WriterCtx, Error, WriterCtx.appendWrite);
+
+    pub fn writer(self: *Self, alloc: mem.Allocator) Writer {
+        return .{ .context = .{ .str = self, .alloc = alloc } };
+    }
+
     pub fn insertBytes(self: *Self, bytes_: []const u8, at: usize, alloc: mem.Allocator) !void {
         if (!unicode.utf8ValidateSlice(bytes_))
             return error.InvalidUtf8;
-        if (!self.isCharStart(at))
+        if (!self.isCharBoundary(at))
             return error.WouldRuinString;
         try self.insertBytesUnchecked(bytes_, at, alloc);
     }
 
     pub fn insertStrig(self: *Self, strig: *const Self, at: usize, alloc: mem.Allocator) !void {
-        if (!self.isCharStart(at))
+        if (!self.isCharBoundary(at))
             return error.WouldRuinString;
         try self.insertBytesUnchecked(strig.bytes(), at, alloc);
     }
@@ -279,7 +305,7 @@ pub const Strig = packed union {
     pub fn insert(self: *Self, codepoint: u21, at: usize, alloc: mem.Allocator) !void {
         if (!unicode.utf8ValidCodepoint(codepoint))
             return error.InvalidUtf8;
-        if (!self.isCharStart(at))
+        if (!self.isCharBoundary(at))
             return error.WouldRuinString;
 
         var buf: [4]u8 = undefined;
@@ -299,7 +325,7 @@ pub const Strig = packed union {
     pub fn removeChar(self: *Self, at: usize) ?u21 {
         if (self.len() == 0)
             return null;
-        if (!self.isCharStart(at))
+        if (!self.isCharBoundary(at))
             @panic("Removal would split UTF-8 sequence.");
 
         const data = self.bytesMut();
@@ -332,7 +358,7 @@ pub const Strig = packed union {
 
     // Checks if a given index is at a the BEGINNING of a UTF-8 character
     // sequence.
-    pub fn isCharStart(self: *const Self, at: usize) bool {
+    pub fn isCharBoundary(self: *const Self, at: usize) bool {
         return self.bytes()[at] & 0b11000000 != 0b10000000;
     }
 
@@ -381,6 +407,8 @@ const CORPUS: []const []const u8 = &.{
     @embedFile("fuzz/urandom-RrKim"),
     @embedFile("fuzz/urandom-sSmU5"),
     @embedFile("fuzz/urandom-uSE1e"),
+    @embedFile("fuzz/urandom-tm41o"),
+    @embedFile("fuzz/urandom-sm8i9"),
 };
 
 test "insertBytes" {
@@ -455,6 +483,20 @@ test "append" {
     try testing.expectEqual(Strig.Kind.heap, str.kind());
     try testing.expectEqual(28, str.len());
     try testing.expect(mem.eql(u8, str.bytes(), "aaâaaaaaaaaaaaaaaaaaaaaaaaa"));
+}
+
+test "writer" {
+    var str = try Strig.from("Why, ", testing.allocator);
+    defer str.deinit(testing.allocator);
+    const writer = str.writer(testing.allocator);
+
+    try writer.writeAll("hello");
+    try testing.expectEqual(Strig.Kind{ .stack = 10 }, str.kind());
+    try testing.expect(mem.eql(u8, str.bytes(), "Why, hello"));
+
+    try writer.print(" {s}!", .{"Zig User"});
+    try testing.expectEqual(Strig.Kind{ .stack = 20 }, str.kind());
+    try testing.expect(mem.eql(u8, str.bytes(), "Why, hello Zig User!"));
 }
 
 test "makeLowercaseASCII, makeUppercaseASCII" {
