@@ -158,7 +158,7 @@ pub const Strig = packed union {
     }
 
     // Sets the length to a smaller amount. Does not free capacity.
-    pub fn shrinkTo(self: *Self, to: usize) void {
+    pub fn truncateTo(self: *Self, to: usize) void {
         assert(self.len() >= to);
         defer assert(self.len() == to);
         return switch (self.kind()) {
@@ -168,7 +168,7 @@ pub const Strig = packed union {
     }
 
     pub fn clear(self: *Self) void {
-        self.shrinkTo(0);
+        self.truncateTo(0);
     }
 
     pub fn eqToBytes(self: *const Self, bytes_: []const u8) bool {
@@ -328,7 +328,7 @@ pub const Strig = packed union {
         const data = self.bytesMut();
         if (at != data.len - 1)
             mem.copyForwards(u8, data[at .. data.len - n], data[at + n ..]);
-        self.shrinkTo(data.len - n);
+        self.truncateTo(data.len - n);
     }
 
     pub fn removeChar(self: *Self, at: usize) ?u21 {
