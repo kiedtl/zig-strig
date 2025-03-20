@@ -108,6 +108,7 @@ pub const Strig = packed union {
     // NOTE: length should be exactly bytes_.length
     //
     fn setHeap(self: *Self, bytes_: []const u8, p_capacity: ?usize, alloc: mem.Allocator) !void {
+        assert(self.kind() != .heap);
         const capac = p_capacity orelse bytes_.len;
         assert(capac >= bytes_.len);
         const buf = try alloc.alloc(u8, capac);
@@ -396,7 +397,7 @@ pub const Strig = packed union {
 
     /// Remove a character sequence from the given index.
     ///
-    /// Returns an error if index isn't at a character boundary.
+    /// Panics if index isn't at a character boundary.
     pub fn removeChar(self: *Self, at: usize) ?u21 {
         if (self.len() == 0)
             return null;
@@ -538,8 +539,9 @@ const CORPUS: []const []const u8 = &.{
     @embedFile("fuzz/urandom-RrKim"),
     @embedFile("fuzz/urandom-sSmU5"),
     @embedFile("fuzz/urandom-uSE1e"),
-    @embedFile("fuzz/urandom-tm41o"),
-    @embedFile("fuzz/urandom-sm8i9"),
+
+    @embedFile("fuzz/rand-tm41o"),
+    @embedFile("fuzz/rand-sm8i9"),
 };
 
 test "insertBytes" {
