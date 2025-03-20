@@ -362,6 +362,37 @@ pub const Strig = packed union {
         return self.bytes()[at] & 0b11000000 != 0b10000000;
     }
 
+    pub fn indexOfByte(self: *const Self, scalar: u8) ?usize {
+        // FIXME: change this depending on architecture (Did some experiments,
+        // and found that larger Vectors tend to make the operation somewhat
+        // slower than non-SIMD implementation)
+        const Vsz = 8;
+        const V = @Vector(Vsz, u8);
+
+        const buf = self.bytes();
+        const splat: V = @splat(scalar);
+
+        // SIMD
+        var i: usize = 0;
+        while (i + Vsz < buf.len) : (i += Vsz) {
+            const chunk: V = @as(*const [Vsz]u8, @ptrCast(buf.ptr[i..]))[0..Vsz].*;
+            if (@reduce(.Or, chunk == splat))
+                // Find exact index
+                for (0..Vsz) |j|
+                    if (chunk[j] == scalar)
+                        return i + j;
+        }
+
+        // Naive fallback
+        // FIXME: test that there's no overlap between SIMD search and naive one
+        if (i != buf.len)
+            for (buf[i..], i..) |ch, j|
+                if (ch == scalar)
+                    return j;
+
+        return null;
+    }
+
     // Gets the index of the nth codepoint.
     pub fn findCharInd(self: *const Self, nth: usize) !u56 {
         const l = self.len();
@@ -374,6 +405,16 @@ pub const Strig = packed union {
         }
 
         return i;
+    }
+
+    pub fn startsWith(self: *const Self, bites: []const u8) bool {
+        // Don't bother checking UTF-8 compliancy
+        return mem.startsWith(u8, self.bytes(), bites);
+    }
+
+    pub fn endsWith(self: *const Self, bites: []const u8) bool {
+        // Don't bother checking UTF-8 compliancy
+        return mem.startsWith(u8, self.bytes(), bites);
     }
 
     // Modify the string in-place, converting ASCII characters to uppercase
@@ -535,6 +576,16 @@ test "popChar" {
         try testing.expectEqual(chars[chars.len - ind - 1], str.popChar().?);
 
     try testing.expectEqual(null, str.popChar());
+}
+
+test "indexOfByte" {
+    const str = Strig.from("This is a test.", testing.allocator) catch unreachable;
+    defer str.deinit(testing.allocator);
+
+    try testing.expectEqual(null, str.indexOfByte('z'));
+    try testing.expectEqual(2, str.indexOfByte('i'));
+    try testing.expectEqual(0, str.indexOfByte('T'));
+    try testing.expectEqual(4, str.indexOfByte(' '));
 }
 
 test "findCharInd" {
