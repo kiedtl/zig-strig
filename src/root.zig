@@ -8,6 +8,15 @@ comptime {
     assert(@bitSizeOf(Strig) == 8 * 24);
 }
 
+// Vector size and type for SIMD operations.
+//
+// FIXME: change this depending on architecture (I did some experiments, and
+// found that larger Vectors tend to make indexOfByte somewhat slower than
+// non-SIMD implementation)
+//
+const Vsz = 8;
+const V = @Vector(Vsz, u8);
+
 pub const Magic = struct {
     pub const INLINE_SMALL = 192; // For inline strings 23 len or less
 
@@ -363,12 +372,6 @@ pub const Strig = packed union {
     }
 
     pub fn indexOfByte(self: *const Self, scalar: u8) ?usize {
-        // FIXME: change this depending on architecture (Did some experiments,
-        // and found that larger Vectors tend to make the operation somewhat
-        // slower than non-SIMD implementation)
-        const Vsz = 8;
-        const V = @Vector(Vsz, u8);
-
         const buf = self.bytes();
         const splat: V = @splat(scalar);
 
@@ -391,6 +394,14 @@ pub const Strig = packed union {
                     return j;
 
         return null;
+    }
+
+    pub fn charAt(self: *const Self, ind: usize) !u21 {
+        if (!self.isCharBoundary(ind))
+            return error.NotCharBoundary;
+        const data = self.bytes();
+        const seqlen = try unicode.utf8ByteSequenceLength(data[ind]);
+        return unicode.utf8Decode(data[ind .. ind + seqlen]) catch unreachable;
     }
 
     // Gets the index of the nth codepoint.
@@ -596,6 +607,15 @@ test "findCharInd" {
     try testing.expectEqual(6, try str.findCharInd(5));
     try testing.expectEqual(14, try str.findCharInd(12));
     try testing.expectError(error.OutOfBounds, str.findCharInd(999));
+}
+
+test "charAt" {
+    var str = Strig.from("and ßpøkë to thē Teleri", testing.allocator) catch unreachable;
+    defer str.deinit(testing.allocator);
+
+    try testing.expectEqual('ß', try str.charAt(4));
+    try testing.expectEqual('ø', try str.charAt(7));
+    try testing.expectEqual('e', try str.charAt(24));
 }
 
 test "Basic roundtrip fuzz testing" {
