@@ -17,17 +17,27 @@ comptime {
 const Vsz = 8;
 const V = @Vector(Vsz, u8);
 
-pub const Magic = struct {
-    pub const INLINE_SMALL = 192; // For inline strings 23 len or less
+// Magic numbers at end of Strig type.
+const Magic = struct {
+    // The range [INLINE .. INLINE + 23] states that the string is
+    //    a) inlined
+    //    b) smaller than 23 bytes.
+    pub const INLINE = 192;
 
+    // Unused: 216-254.
+
+    // Denotes a non-inlined, heap-allocated string.
+    //
     // CompactString crate uses values immediately after inline range to denote
     // heap-allocated strings, but by using values over here, we can better
-    // detect some invalid states in fuzzing (since there are unused values "in
+    // detect some invalid states in fuzzing (since there are invalid values "in
     // between").
     pub const HEAP = 255;
 };
 
-pub const PackedSlice = packed struct {
+// Slices can't be in packed, curses. "No defined memory layout" my ass
+//
+const PackedSlice = packed struct {
     ptr: [*]u8,
     len: u64,
 
@@ -40,17 +50,23 @@ pub const PackedSlice = packed struct {
     }
 };
 
+/// A UTF-8 string that *may* be inlined when smaller than 25 bytes.
+///
 pub const Strig = packed union {
     stack: u192,
     heap: Heap,
 
-    pub const Self = @This();
-
+    /// The two invariants. <stack> denotes an inlined string of a size [0..24],
+    /// heap denotes a heap-allocated string.
     pub const Kind = union(enum) { stack: u5, heap };
 
+    /// Errors that can be returned by various functions.
     pub const Error = error{
         InvalidUtf8,
     } || mem.Allocator.Error || error{
+        // FIXME: Cleanup UTF-8 handling, bundle unicode implementation since the
+        // stdlib variations are being deprecated.
+        //
         // Why isn't unicode.Utf8DecodeError public?
         Utf8ExpectedContinuation,
         Utf8OverlongEncoding,
@@ -59,19 +75,32 @@ pub const Strig = packed union {
         CodepointTooLarge,
     };
 
+    /// Heap-allocated variant of a Strig.
+    ///
+    /// - <data> is the packed slice returned by the allocator. It's length
+    ///   is the used portion, not the entire capacity.
+    /// - <capacity> is self-explanatory, defined as a 7-byte integer to leave
+    ///   space for the magic value.
+    /// - <end> is the magic value, present in both variants of Strig but
+    ///   explicitly only defined here for convenience purposes.
+    ///
     pub const Heap = packed struct(u192) {
         data: PackedSlice,
         capacity: u56,
         end: u8 = undefined,
 
+        /// Return the entire slice with the entire capacity.
         pub fn entireThing(self: *Heap) []u8 {
             return self.data.ptr[0..self.capacity];
         }
 
+        /// Return the entire const slice with the entire capacity.
         pub fn entireThingConst(self: *const Heap) []const u8 {
             return self.data.ptr[0..self.capacity];
         }
     };
+
+    const Self = @This();
 
     // NOTE: this function should copy the buffer before setting self, in case
     // bytes_ points to self's stack portion or similar.
@@ -87,23 +116,6 @@ pub const Strig = packed union {
         self.heap.data.len = bytes_.len;
         self.magicPtr().* = Magic.HEAP;
         assert(self.len() == bytes_.len);
-    }
-
-    // Create from a non-owned buffer.
-    //
-    pub fn from(bytes_: []const u8, alloc: mem.Allocator) !Self {
-        if (!unicode.utf8ValidateSlice(bytes_))
-            return error.InvalidUtf8;
-        var b: Self = undefined;
-        switch (bytes_.len) {
-            0...24 => {
-                @memcpy(b.getInlineData()[0..bytes_.len], bytes_);
-                if (bytes_.len != 24)
-                    b.magicPtr().* = @as(u8, @intCast(bytes_.len)) + Magic.INLINE_SMALL;
-            },
-            else => try b.setHeap(bytes_, null, alloc),
-        }
-        return b;
     }
 
     fn getInlineData(self: *Self) *[24]u8 {
@@ -122,6 +134,25 @@ pub const Strig = packed union {
         return &self.heap.end;
     }
 
+    /// Create from a non-owned buffer.
+    ///
+    /// The buffer is not reused. Allocations will occur as necessary.
+    pub fn from(bytes_: []const u8, alloc: mem.Allocator) !Self {
+        if (!unicode.utf8ValidateSlice(bytes_))
+            return error.InvalidUtf8;
+        var b: Self = undefined;
+        switch (bytes_.len) {
+            0...24 => {
+                @memcpy(b.getInlineData()[0..bytes_.len], bytes_);
+                if (bytes_.len != 24)
+                    b.magicPtr().* = @as(u8, @intCast(bytes_.len)) + Magic.INLINE;
+            },
+            else => try b.setHeap(bytes_, null, alloc),
+        }
+        return b;
+    }
+
+    /// Free any allocations. If inlined, does nothing.
     pub fn deinit(self: *const Self, alloc: mem.Allocator) void {
         switch (self.magic()) {
             Magic.HEAP => alloc.free(self.heap.entireThingConst()),
@@ -129,8 +160,11 @@ pub const Strig = packed union {
         }
     }
 
+    /// Return a value determining whether the string is inlined or not (and if
+    /// so, its length).
+    ///
     pub fn kind(self: *const Self) Kind {
-        const I = Magic.INLINE_SMALL;
+        const I = Magic.INLINE;
         return switch (self.magic()) {
             0...I - 1 => .{ .stack = 24 },
             I...I + 23 => |v| .{ .stack = @intCast(v - I) },
@@ -139,6 +173,8 @@ pub const Strig = packed union {
         };
     }
 
+    /// Return the capacity of the string. If inlined, the capacity is always
+    /// 24.
     pub fn capacity(self: *const Self) u56 {
         return switch (self.kind()) {
             .stack => |_| 24,
@@ -146,6 +182,7 @@ pub const Strig = packed union {
         };
     }
 
+    /// Return the number of BYTES in the string.
     pub fn len(self: *const Self) u64 {
         return switch (self.kind()) {
             .stack => |l| l,
@@ -153,28 +190,34 @@ pub const Strig = packed union {
         };
     }
 
+    /// Determine if the string contains no elements.
     pub fn isEmpty(self: *const Self) void {
         return self.len() == 0;
     }
 
-    // Sets the length to a smaller amount. Does not free capacity.
+    /// Sets the length to a smaller amount. Asserts that <to> is indeed equal
+    /// to or smaller than the current length. Does not free capacity.
+    ///
     pub fn truncateTo(self: *Self, to: usize) void {
         assert(self.len() >= to);
         defer assert(self.len() == to);
         return switch (self.kind()) {
-            .stack => |_| self.magicPtr().* = Magic.INLINE_SMALL + @as(u8, @intCast(to)),
+            .stack => |_| self.magicPtr().* = Magic.INLINE + @as(u8, @intCast(to)),
             .heap => self.heap.data.len = to,
         };
     }
 
+    /// Truncate the string to zero. Does not free capacity.
     pub fn clear(self: *Self) void {
         self.truncateTo(0);
     }
 
+    /// Do a naive, non-Unicode-aware byte-to-byte comparison.
     pub fn eqToBytes(self: *const Self, bytes_: []const u8) bool {
         return mem.eql(u8, self.bytes(), bytes_);
     }
 
+    /// Return a slice of the string's bytes.
     pub fn bytes(self: *const Self) []const u8 {
         return switch (self.kind()) {
             .stack => |l| self.getInlineDataConst()[0..l],
@@ -182,6 +225,7 @@ pub const Strig = packed union {
         };
     }
 
+    /// Return a slice of the string's bytes.
     pub fn bytesMut(self: *Self) []u8 {
         return switch (self.kind()) {
             .stack => |l| self.getInlineData()[0..l],
@@ -189,6 +233,9 @@ pub const Strig = packed union {
         };
     }
 
+    /// Format a string, printing out its raw bytes.
+    ///
+    /// Format specifier should be empty.
     pub fn format(self: *const Self, comptime f: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
         if (comptime mem.eql(u8, f, "s")) {
             @compileError("How about no");
@@ -199,9 +246,8 @@ pub const Strig = packed union {
         try w.writeAll(self.bytes());
     }
 
-    // Ensure required MUTABLE capacity. In other words, constant strings will
-    // be converted to inlined or heap strings.
-    //
+    /// Ensure the required capacity exists. Inlined strings will be converted
+    /// to heap-allocated as necessary.
     pub fn ensureCapacity(self: *Self, needed_cap: u64, alloc: mem.Allocator) !void {
         switch (self.kind()) {
             .stack => |_| if (needed_cap > 24) try self.setHeap(self.bytes(), needed_cap, alloc),
@@ -255,22 +301,27 @@ pub const Strig = packed union {
                 const new_l = old_len + bytes_.len;
                 assert(new_l <= 24);
                 if (new_l != 24)
-                    self.magicPtr().* = Magic.INLINE_SMALL + @as(u8, @intCast(new_l));
+                    self.magicPtr().* = Magic.INLINE + @as(u8, @intCast(new_l));
             },
             .heap => self.heap.data.len += bytes_.len,
         }
     }
 
+    /// Append bytes to the string. An error is returned if the bytes aren't
+    /// valid UTF-8.
     pub fn appendBytes(self: *Self, bytes_: []const u8, alloc: mem.Allocator) Error!void {
         if (!unicode.utf8ValidateSlice(bytes_))
             return error.InvalidUtf8;
         try self.insertBytesUnchecked(bytes_, self.len(), alloc);
     }
 
+    /// Append another Strig to this Strig.
     pub fn appendStrig(self: *Self, strig: *const Self, alloc: mem.Allocator) Error!void {
         try self.insertBytesUnchecked(strig.bytes(), self.len(), alloc);
     }
 
+    /// Append a codepoint to this Strig. Returns an error if the codepoint
+    /// isn't valid.
     pub fn append(self: *Self, codepoint: u21, alloc: mem.Allocator) Error!void {
         if (!unicode.utf8ValidCodepoint(codepoint))
             return error.InvalidUtf8;
@@ -293,10 +344,15 @@ pub const Strig = packed union {
     };
     pub const Writer = std.io.Writer(WriterCtx, Error, WriterCtx.appendWrite);
 
+    /// Returns a Writer for this Strig.
     pub fn writer(self: *Self, alloc: mem.Allocator) Writer {
         return .{ .context = .{ .str = self, .alloc = alloc } };
     }
 
+    /// Inserts bytes into the specific index.
+    ///
+    /// Returns an error if the bytes aren't valid UTF-8, or if insertion would
+    /// split a UTF-8 character sequence.
     pub fn insertBytes(self: *Self, bytes_: []const u8, at: usize, alloc: mem.Allocator) !void {
         if (!unicode.utf8ValidateSlice(bytes_))
             return error.InvalidUtf8;
@@ -305,12 +361,19 @@ pub const Strig = packed union {
         try self.insertBytesUnchecked(bytes_, at, alloc);
     }
 
+    /// Inserts bytes into the specific index.
+    ///
+    /// an error if insertion would split a UTF-8 character sequence.
     pub fn insertStrig(self: *Self, strig: *const Self, at: usize, alloc: mem.Allocator) !void {
         if (!self.isCharBoundary(at))
             return error.WouldRuinString;
         try self.insertBytesUnchecked(strig.bytes(), at, alloc);
     }
 
+    /// Inserts bytes into the specific index.
+    ///
+    /// Returns an error if the codepoint isn't valid, or if insertion would
+    /// split a UTF-8 character sequence.
     pub fn insert(self: *Self, codepoint: u21, at: usize, alloc: mem.Allocator) !void {
         if (!unicode.utf8ValidCodepoint(codepoint))
             return error.InvalidUtf8;
@@ -331,6 +394,9 @@ pub const Strig = packed union {
         self.truncateTo(data.len - n);
     }
 
+    /// Remove a character sequence from the given index.
+    ///
+    /// Returns an error if index isn't at a character boundary.
     pub fn removeChar(self: *Self, at: usize) ?u21 {
         if (self.len() == 0)
             return null;
@@ -344,6 +410,7 @@ pub const Strig = packed union {
         return codepoint;
     }
 
+    /// Pops a character off the end and returns it.
     pub fn popChar(self: *Self) ?u21 {
         const data = self.bytes();
         if (data.len == 0)
@@ -365,12 +432,14 @@ pub const Strig = packed union {
         return codepoint;
     }
 
-    // Checks if a given index is at a the BEGINNING of a UTF-8 character
-    // sequence.
+    /// Checks if a given index is at a the BEGINNING of a UTF-8 character
+    /// sequence.
     pub fn isCharBoundary(self: *const Self, at: usize) bool {
         return self.bytes()[at] & 0b11000000 != 0b10000000;
     }
 
+    /// Find the index of a specific byte in the string.
+    ///
     pub fn indexOfByte(self: *const Self, scalar: u8) ?usize {
         const buf = self.bytes();
         const splat: V = @splat(scalar);
@@ -396,6 +465,9 @@ pub const Strig = packed union {
         return null;
     }
 
+    /// Returns the Unicode codepoint at the given index.
+    ///
+    /// Returns an error if the index isn't at a character boundary.
     pub fn charAt(self: *const Self, ind: usize) !u21 {
         if (!self.isCharBoundary(ind))
             return error.NotCharBoundary;
@@ -404,7 +476,12 @@ pub const Strig = packed union {
         return unicode.utf8Decode(data[ind .. ind + seqlen]) catch unreachable;
     }
 
-    // Gets the index of the nth codepoint.
+    /// Gets the index of the nth (starting from 0) Unicode codepoint.
+    ///
+    /// For example, findCharInd("yeß?", 3) should return 4, since 'ß' is
+    /// encoded as 2 bytes.
+    ///
+    /// Returns an error in case of an out of bounds.
     pub fn findCharInd(self: *const Self, nth: usize) !u56 {
         const l = self.len();
         const data = self.bytes();
@@ -418,18 +495,20 @@ pub const Strig = packed union {
         return i;
     }
 
+    /// Naive mem.startsWith wrapper.
     pub fn startsWith(self: *const Self, bites: []const u8) bool {
         // Don't bother checking UTF-8 compliancy
         return mem.startsWith(u8, self.bytes(), bites);
     }
 
+    /// Naive mem.endsWith wrapper.
     pub fn endsWith(self: *const Self, bites: []const u8) bool {
         // Don't bother checking UTF-8 compliancy
         return mem.startsWith(u8, self.bytes(), bites);
     }
 
-    // Modify the string in-place, converting ASCII characters to uppercase
-    // variants.
+    /// Modify the string in-place, converting ASCII characters to uppercase
+    /// variants.
     pub fn makeUppercaseASCII(self: *Self) !void {
         for (self.bytesMut()) |*byte|
             switch (byte.*) {
@@ -438,8 +517,8 @@ pub const Strig = packed union {
             };
     }
 
-    // Modify the string in-place, converting ASCII characters to lowercase
-    // variants.
+    /// Modify the string in-place, converting ASCII characters to lowercase
+    /// variants.
     pub fn makeLowercaseASCII(self: *Self) !void {
         for (self.bytesMut()) |*byte|
             switch (byte.*) {
@@ -618,7 +697,7 @@ test "charAt" {
     try testing.expectEqual('e', try str.charAt(24));
 }
 
-test "Basic roundtrip fuzz testing" {
+test "Fuzz: basic roundtrip testing" {
     try testing.fuzz({}, struct {
         pub fn f(_: void, input: []const u8) anyerror!void {
             const str = Strig.from(input, testing.allocator) catch return;
@@ -629,7 +708,7 @@ test "Basic roundtrip fuzz testing" {
     }.f, .{ .corpus = CORPUS });
 }
 
-test "Mutating via append()" {
+test "Fuzz: mutating via append()" {
     try testing.fuzz({}, struct {
         pub fn f(_: void, input: []const u8) anyerror!void {
             var str = Strig.from("", testing.allocator) catch return;
