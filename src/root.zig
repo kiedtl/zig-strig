@@ -398,11 +398,10 @@ pub const Strig = packed union {
     /// Remove a character sequence from the given index.
     ///
     /// Panics if index isn't at a character boundary.
-    pub fn removeChar(self: *Self, at: usize) ?u21 {
-        if (self.len() == 0)
-            return null;
+    pub fn removeChar(self: *Self, at: usize) !u21 {
+        assert(at < self.len());
         if (!self.isCharBoundary(at))
-            @panic("Removal would split UTF-8 sequence.");
+            return error.WouldRuinString;
 
         const data = self.bytesMut();
         const seqlen = unicode.utf8ByteSequenceLength(data[at]) catch unreachable;
@@ -647,11 +646,11 @@ test "removeChar" {
     var str = Strig.from("Thïs is â teßt", testing.allocator) catch unreachable;
     defer str.deinit(testing.allocator);
 
-    try testing.expectEqual('T', str.removeChar(0));
-    try testing.expectEqual('ï', str.removeChar(1));
+    try testing.expectEqual('T', try str.removeChar(0));
+    try testing.expectEqual('ï', try str.removeChar(1));
     try testing.expect(mem.eql(u8, str.bytes(), "hs is â teßt"));
 
-    try testing.expectEqual('ß', str.removeChar(12));
+    try testing.expectEqual('ß', try str.removeChar(12));
     try testing.expect(mem.eql(u8, str.bytes(), "hs is â tet"));
 }
 
@@ -727,6 +726,79 @@ test "Fuzz: mutating via append()" {
             }
             try testing.expectEqual(buf.items.len, str.len());
             try testing.expect(mem.eql(u8, str.bytes(), buf.items));
+        }
+    }.f, .{ .corpus = CORPUS });
+}
+
+test "Fuzz: random actions" {
+    const Ctx = struct {
+        rng: std.Random,
+        con: *std.ArrayList(u8),
+        str: *Strig,
+        alloc: mem.Allocator,
+    };
+
+    var gpa = std.heap.DebugAllocator(.{}){};
+    var rng = std.Random.DefaultPrng.init(0xdeadbeef);
+    var con = std.ArrayList(u8).init(gpa.allocator());
+    var str = Strig.from("", gpa.allocator()) catch return;
+    var cty = Ctx{
+        .rng = rng.random(),
+        .con = &con,
+        .str = &str,
+        .alloc = gpa.allocator(),
+    };
+
+    defer _ = gpa.deinit();
+    defer con.deinit();
+    defer str.deinit(gpa.allocator());
+
+    try testing.fuzz(&cty, struct {
+        pub fn f(ctx: *Ctx, input: []const u8) anyerror!void {
+            if (ctx.str.len() == 0) {
+                ctx.str.appendBytes(input, ctx.alloc) catch return;
+                ctx.con.appendSlice(input) catch unreachable;
+                return;
+            }
+
+            const Action = union(enum) {
+                AppendBytes,
+                InsertBytes,
+                RemoveChar,
+                PopChar,
+            };
+            const ACTIONS = &[_]Action{
+                .AppendBytes, .InsertBytes,
+                .RemoveChar,  .PopChar,
+            };
+
+            const action = ACTIONS[ctx.rng.int(usize) % ACTIONS.len];
+            const randpos = ctx.rng.int(usize) % ctx.str.len();
+            switch (action) {
+                .AppendBytes => {
+                    ctx.str.appendBytes(input, ctx.alloc) catch return;
+                    ctx.con.appendSlice(input) catch unreachable;
+                },
+                .InsertBytes => {
+                    ctx.str.insertBytes(input, randpos, ctx.alloc) catch return;
+                    ctx.con.insertSlice(randpos, input) catch unreachable;
+                },
+                .RemoveChar => {
+                    const codepoint = ctx.str.removeChar(randpos) catch return;
+                    const l = std.unicode.utf8CodepointSequenceLength(codepoint) catch unreachable;
+                    for (0..l) |_|
+                        _ = ctx.con.orderedRemove(randpos);
+                },
+                .PopChar => {
+                    const codepoint = ctx.str.popChar().?;
+                    const l = std.unicode.utf8CodepointSequenceLength(codepoint) catch unreachable;
+                    for (0..l) |_|
+                        _ = ctx.con.pop().?;
+                },
+            }
+
+            try testing.expectEqual(ctx.con.items.len, ctx.str.len());
+            try testing.expect(mem.eql(u8, ctx.str.bytes(), ctx.con.items));
         }
     }.f, .{ .corpus = CORPUS });
 }
