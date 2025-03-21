@@ -33,3 +33,18 @@ Implements:
 
 - Writer
 - Format
+
+## TODO
+
+Strig is a work in progress. Comments, suggestions, PRs, useless bikeshedding,
+and all Strig-related hatemail (`kiedtl at tilde dot team`) are appreciated.
+
+- New APIs:
+  - `findChar`, `findString`, `replaceChar`, `replaceString`, `retain`
+  - `initFromBytesLossy`
+  - `makeASCIILossy`
+  - `repeat`
+  - `shrinkTo`, `shrinkToFit`
+  - `initRand` (generate random alphanumeric string?)
+- API for existing functions may change to allow for better ergonomics.
+- Fuzz-testing can be improved.
