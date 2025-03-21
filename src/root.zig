@@ -135,10 +135,28 @@ pub const Strig = packed union {
         return &self.heap.end;
     }
 
+    /// Initializes a new comptime-known string. It is a compile error if it
+    /// cannot be inlined or if it's invalid UTF-8.
+    ///
+    /// Does not allocate. Should go without saying.
+    ///
+    pub fn initLit(comptime bytes_: []const u8) Self {
+        if (bytes_.len > 24)
+            @compileError("Cannot inline string greater than 24 bytes.");
+        if (!comptime unicode.utf8ValidateSlice(bytes_))
+            @compileError("String is not valid UTF-8.");
+
+        var b: Self = undefined;
+        @memcpy(b.getInlineData()[0..bytes_.len], bytes_);
+        if (bytes_.len != 24)
+            b.magicPtr().* = @as(u8, @intCast(bytes_.len)) + Magic.INLINE;
+        return b;
+    }
+
     /// Create from a non-owned buffer.
     ///
     /// The buffer is not reused. Allocations will occur as necessary.
-    pub fn from(bytes_: []const u8, alloc: mem.Allocator) !Self {
+    pub fn init(bytes_: []const u8, alloc: mem.Allocator) !Self {
         if (!unicode.utf8ValidateSlice(bytes_))
             return error.InvalidUtf8;
         var b: Self = undefined;
@@ -544,7 +562,7 @@ const CORPUS: []const []const u8 = &.{
 };
 
 test "insertBytes" {
-    var str = try Strig.from("First name: <>; Last name: <>", testing.allocator);
+    var str = try Strig.init("First name: <>; Last name: <>", testing.allocator);
     defer str.deinit(testing.allocator);
 
     try str.insertBytes("Fëanor", 13, testing.allocator);
@@ -554,7 +572,7 @@ test "insertBytes" {
 }
 
 test "appendBytes" {
-    var str = try Strig.from("Why, ", testing.allocator);
+    var str = Strig.initLit("Why, ");
     defer str.deinit(testing.allocator);
 
     try str.appendBytes("hello", testing.allocator);
@@ -567,7 +585,7 @@ test "appendBytes" {
 }
 
 test "append" {
-    var str = Strig.from("", testing.allocator) catch return;
+    var str = Strig.initLit("");
     defer str.deinit(testing.allocator);
 
     try testing.expectEqual(Strig.Kind{ .stack = 0 }, str.kind());
@@ -618,7 +636,7 @@ test "append" {
 }
 
 test "writer" {
-    var str = try Strig.from("Why, ", testing.allocator);
+    var str = Strig.initLit("Why, ");
     defer str.deinit(testing.allocator);
     const writer = str.writer(testing.allocator);
 
@@ -632,7 +650,7 @@ test "writer" {
 }
 
 test "makeLowercaseASCII, makeUppercaseASCII" {
-    var str = Strig.from("!@#ÂHello, this is a test. I SAID HELLO", testing.allocator) catch unreachable;
+    var str = Strig.init("!@#ÂHello, this is a test. I SAID HELLO", testing.allocator) catch unreachable;
     defer str.deinit(testing.allocator);
 
     try str.makeLowercaseASCII();
@@ -643,7 +661,7 @@ test "makeLowercaseASCII, makeUppercaseASCII" {
 }
 
 test "removeChar" {
-    var str = Strig.from("Thïs is â teßt", testing.allocator) catch unreachable;
+    var str = Strig.initLit("Thïs is â teßt");
     defer str.deinit(testing.allocator);
 
     try testing.expectEqual('T', try str.removeChar(0));
@@ -655,7 +673,7 @@ test "removeChar" {
 }
 
 test "popChar" {
-    var str = Strig.from("Grâß—fëð șôųŕđøūǵḣ", testing.allocator) catch unreachable;
+    var str = Strig.init("Grâß—fëð șôųŕđøūǵḣ", testing.allocator) catch unreachable;
     defer str.deinit(testing.allocator);
 
     const chars = [_]u21{
@@ -670,7 +688,7 @@ test "popChar" {
 }
 
 test "indexOfByte" {
-    const str = Strig.from("This is a test.", testing.allocator) catch unreachable;
+    const str = Strig.initLit("This is a test.");
     defer str.deinit(testing.allocator);
 
     try testing.expectEqual(null, str.indexOfByte('z'));
@@ -680,7 +698,7 @@ test "indexOfByte" {
 }
 
 test "findCharInd" {
-    var str = Strig.from("He hástenëd → Alqualonde", testing.allocator) catch unreachable;
+    var str = Strig.init("He hástenëd → Alqualonde", testing.allocator) catch unreachable;
     defer str.deinit(testing.allocator);
 
     try testing.expectEqual(0, try str.findCharInd(0));
@@ -690,7 +708,7 @@ test "findCharInd" {
 }
 
 test "charAt" {
-    var str = Strig.from("and ßpøkë to thē Teleri", testing.allocator) catch unreachable;
+    var str = Strig.init("and ßpøkë to thē Teleri", testing.allocator) catch unreachable;
     defer str.deinit(testing.allocator);
 
     try testing.expectEqual('ß', try str.charAt(4));
@@ -701,7 +719,7 @@ test "charAt" {
 test "Fuzz: basic roundtrip testing" {
     try testing.fuzz({}, struct {
         pub fn f(_: void, input: []const u8) anyerror!void {
-            const str = Strig.from(input, testing.allocator) catch return;
+            const str = Strig.init(input, testing.allocator) catch return;
             defer str.deinit(testing.allocator);
             try testing.expectEqual(str.len(), input.len);
             try testing.expect(mem.eql(u8, str.bytes(), input));
@@ -712,7 +730,7 @@ test "Fuzz: basic roundtrip testing" {
 test "Fuzz: mutating via append()" {
     try testing.fuzz({}, struct {
         pub fn f(_: void, input: []const u8) anyerror!void {
-            var str = Strig.from("", testing.allocator) catch return;
+            var str = Strig.init("", testing.allocator) catch return;
             defer str.deinit(testing.allocator);
 
             var buf = std.ArrayList(u8).init(testing.allocator);
@@ -741,7 +759,7 @@ test "Fuzz: random actions" {
     var gpa = std.heap.DebugAllocator(.{}){};
     var rng = std.Random.DefaultPrng.init(0xdeadbeef);
     var con = std.ArrayList(u8).init(gpa.allocator());
-    var str = Strig.from("", gpa.allocator()) catch return;
+    var str = Strig.initLit("");
     var cty = Ctx{
         .rng = rng.random(),
         .con = &con,
