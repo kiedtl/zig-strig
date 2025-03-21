@@ -46,5 +46,9 @@ and all Strig-related hatemail (`kiedtl at tilde dot team`) are appreciated.
   - `repeat`
   - `shrinkTo`, `shrinkToFit`
   - `initRand` (generate random alphanumeric string?)
+  - `count`
+  - `chars` (succinct data structure?)
+- Simple UTF-8 utilities (encode, decode, sequence length, validation) should be
+  bundled, since half of `std.unicode` is deprecated.
 - API for existing functions may change to allow for better ergonomics.
 - Fuzz-testing can be improved.
