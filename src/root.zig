@@ -102,6 +102,10 @@ pub const Strig = packed union {
 
     const Self = @This();
 
+    pub const empty: Self = .{
+        .stack = @as(u192, @bitCast(([1]u8{0xAA} ** 23) ++ [1]u8{Magic.INLINE})),
+    };
+
     // NOTE: this function should copy the buffer before setting self, in case
     // bytes_ points to self's stack portion or similar.
     //
@@ -561,6 +565,11 @@ const CORPUS: []const []const u8 = &.{
     @embedFile("fuzz/rand-sm8i9"),
 };
 
+test "empty" {
+    var str = Strig.empty;
+    try testing.expectEqual(Strig.Kind{ .stack = 0 }, str.kind());
+}
+
 test "insertBytes" {
     var str = try Strig.init("First name: <>; Last name: <>", testing.allocator);
     defer str.deinit(testing.allocator);
@@ -585,7 +594,7 @@ test "appendBytes" {
 }
 
 test "append" {
-    var str = Strig.initLit("");
+    var str = Strig.empty;
     defer str.deinit(testing.allocator);
 
     try testing.expectEqual(Strig.Kind{ .stack = 0 }, str.kind());
@@ -759,7 +768,7 @@ test "Fuzz: random actions" {
     var gpa = std.heap.DebugAllocator(.{}){};
     var rng = std.Random.DefaultPrng.init(0xdeadbeef);
     var con = std.ArrayList(u8).init(gpa.allocator());
-    var str = Strig.initLit("");
+    var str = Strig.empty;
     var cty = Ctx{
         .rng = rng.random(),
         .con = &con,
