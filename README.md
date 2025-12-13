@@ -1,5 +1,7 @@
 # Strig
 
+![](https://tilde.team/~kiedtl/images/badges/zig/move-justice.gif)
+
 Compact string library for Zig.
 
 - Each `Strig` is 24 bytes in size. 
