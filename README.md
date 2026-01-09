@@ -14,7 +14,7 @@ Compact string library for Zig.
 
 Methods:
 
-- `initLit`, `init`
+- `initLit`, `init`, `clone`
 - `deinit`
 - `kind`, `capacity`, `len`, `isEmpty`
 - `truncateTo`, `clear`

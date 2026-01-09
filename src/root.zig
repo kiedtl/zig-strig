@@ -183,6 +183,18 @@ pub const Strig = packed union {
         }
     }
 
+    /// Clone the Strig into an identical copy, allocating as necessary.
+    pub fn clone(self: *const Self, alloc: mem.Allocator) !Strig {
+        return switch (self.magic()) {
+            Magic.HEAP => {
+                var b: Self = undefined;
+                try b.setHeap(self.heap.entireThingConst(), null, alloc);
+                return b;
+            },
+            else => return self.*, // No need to allocate.
+        };
+    }
+
     /// Return a value determining whether the string is inlined or not (and if
     /// so, its length).
     ///
