@@ -35,6 +35,7 @@ Implements:
 
 - Writer
 - Format
+- HashMap context
 
 ## TODO
 

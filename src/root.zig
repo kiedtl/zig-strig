@@ -562,6 +562,17 @@ pub const Strig = packed union {
     }
 };
 
+/// A HashMap context that treats Strig as a []const u8. It can be used as such:
+/// std.HashMap(Strig, MyType, Strig.HashContext, std.hash_map.default_max_load_percentage)
+pub const HashContext = struct {
+    pub fn hash(_: @This(), s: Strig) u64 {
+        return std.hash.Wyhash.hash(0, s.bytes());
+    }
+    pub fn eql(_: @This(), a: Strig, b: Strig) bool {
+        return mem.eql(u8, a.bytes(), b.bytes());
+    }
+};
+
 const CORPUS: []const []const u8 = &.{
     @embedFile("fuzz/urandom-bdrVR"),
     @embedFile("fuzz/urandom-BP8AV"),
