@@ -36,6 +36,7 @@ Implements:
 - Writer
 - Format
 - HashMap context
+- `jsonStringify`
 
 ## TODO
 

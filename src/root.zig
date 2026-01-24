@@ -268,6 +268,11 @@ pub const Strig = packed union {
         };
     }
 
+    /// Stringify a Strig.
+    pub fn jsonStringify(val: Strig, stream: anytype) !void {
+        try stream.write(val.bytes());
+    }
+
     /// Format a string, printing out its raw bytes.
     ///
     /// Format specifier should be empty.
